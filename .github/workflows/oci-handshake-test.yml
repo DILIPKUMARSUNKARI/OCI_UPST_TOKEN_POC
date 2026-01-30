@@ -15,11 +15,22 @@ jobs:
         uses: actions/checkout@v4
 
       # --- STEP 1: Get GitHub's OIDC Token ---
+      # - name: Get GitHub OIDC Token
+      #   id: get-id-token
+      #   run: |
+      #     # Request the token from GitHub's internal provider
+      #     token=$(curl -sLS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/your-org" \
+      #       -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" | jq -r '.value')
+          
+      #     echo "::add-mask::$token"
+      #     echo "id_token=$token" >> $GITHUB_OUTPUT
+
+      # --- STEP 1: Get GitHub OIDC Token ---
       - name: Get GitHub OIDC Token
         id: get-id-token
         run: |
-          # Request the token from GitHub's internal provider
-          token=$(curl -sLS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/your-org" \
+          # FIX: Use the Client ID as the audience so OCI accepts it!
+          token=$(curl -sLS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ secrets.IDCS_CLIENT_ID }}" \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" | jq -r '.value')
           
           echo "::add-mask::$token"
