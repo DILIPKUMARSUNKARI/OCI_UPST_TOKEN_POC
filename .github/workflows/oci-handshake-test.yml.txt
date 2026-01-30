@@ -1,0 +1,95 @@
+name: OCI Keyless Auth Test
+
+on: [workflow_dispatch] # Allows you to run this manually from the Actions tab
+
+jobs:
+  test-auth:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # REQUIRED for OIDC
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- STEP 1: Get GitHub's OIDC Token ---
+      - name: Get GitHub OIDC Token
+        id: get-id-token
+        run: |
+          # Request the token from GitHub's internal provider
+          token=$(curl -sLS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/your-org" \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" | jq -r '.value')
+          
+          echo "::add-mask::$token"
+          echo "id_token=$token" >> $GITHUB_OUTPUT
+
+      # --- STEP 2: Generate Temporary RSA Key (Session Key) ---
+      - name: Generate Session Key
+        run: |
+          mkdir -p .oci
+          openssl genrsa -out .oci/session_key.pem 2048
+          openssl rsa -pubout -in .oci/session_key.pem -out .oci/session_key_public.pem
+          # Format public key for the API call (remove headers/newlines)
+          echo "PUBLIC_KEY=$(cat .oci/session_key_public.pem | sed '1d;$d' | tr -d '\n')" >> $GITHUB_ENV
+
+      # --- STEP 3: The Handshake (Exchange GitHub Token for OCI UPST) ---
+      - name: Exchange Token for OCI UPST
+        id: exchange-token
+        env:
+          IDCS_URL: ${{ secrets.IDCS_DOMAIN_URL }}
+          CLIENT_ID: ${{ secrets.IDCS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.IDCS_CLIENT_SECRET }}
+          GH_TOKEN: ${{ steps.get-id-token.outputs.id_token }}
+        run: |
+          # Call OCI Token Endpoint
+          RESPONSE=$(curl -s -X POST "${IDCS_URL}/oauth2/v1/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+            -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+            -d "requested_token_type=urn:oci:token-type:oci-upst" \
+            -d "subject_token=${GH_TOKEN}" \
+            -d "subject_token_type=jwt" \
+            -d "public_key=${PUBLIC_KEY}")
+
+          # Extract the UPST token
+          UPST_TOKEN=$(echo $RESPONSE | jq -r '.access_token')
+
+          if [ "$UPST_TOKEN" == "null" ]; then
+            echo "Auth Failed! Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "::add-mask::$UPST_TOKEN"
+          echo "upst_token=$UPST_TOKEN" >> $GITHUB_OUTPUT
+
+      # --- STEP 4: Configure OCI CLI (or Terraform) to use the Token ---
+      - name: Create OCI Config File
+        env:
+          TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          REGION: ${{ secrets.OCI_REGION }}
+          UPST: ${{ steps.exchange-token.outputs.upst_token }}
+        run: |
+          # Save token to file
+          echo "$UPST" > .oci/security_token
+
+          # Create config file that points to the token
+          cat <<EOF > .oci/config
+          [DEFAULT]
+          security_token_file=$(pwd)/.oci/security_token
+          key_file=$(pwd)/.oci/session_key.pem
+          tenancy=$TENANCY
+          region=$REGION
+          auth=security_token
+          EOF
+          
+          # Fix permissions
+          chmod 600 .oci/config .oci/session_key.pem
+
+      # --- STEP 5: Verify Auth Works ---
+      - name: Verify Connection (List Regions)
+        env:
+          OCI_CONFIG_FILE: $(pwd)/.oci/config
+        run: |
+          echo "Testing OCI Connectivity..."
+          oci iam region list --config-file .oci/config
