@@ -68,3 +68,40 @@ jobs:
           JSON_BODY=$(echo "$RESPONSE_BODY" | sed '$d')
 
           if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ FAILURE (HTTP $HTTP_STATUS)"
+            echo "$JSON_BODY"
+            exit 1
+          fi
+
+          UPST_TOKEN=$(echo "$JSON_BODY" | jq -r '.access_token')
+          echo "::add-mask::$UPST_TOKEN"
+          echo "upst_token=$UPST_TOKEN" >> $GITHUB_OUTPUT
+          echo "✅ OCI Token received!"
+
+      # --- STEP 4: Configure OCI CLI ---
+      - name: Create OCI Config
+        env:
+          TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          REGION: ${{ secrets.OCI_REGION }}
+          UPST: ${{ steps.exchange-token.outputs.upst_token }}
+        run: |
+          echo "$UPST" > .oci/security_token
+          
+          cat <<EOF > .oci/config
+          [DEFAULT]
+          security_token_file=$(pwd)/.oci/security_token
+          key_file=$(pwd)/.oci/session_key.pem
+          tenancy=$TENANCY
+          region=$REGION
+          auth=security_token
+          EOF
+          
+          chmod 600 .oci/config .oci/session_key.pem
+
+      # --- STEP 5: Verify Connection ---
+      - name: Verify OCI Connection
+        env:
+          OCI_CONFIG_FILE: $(pwd)/.oci/config
+        run: |
+          echo "Testing OCI Connectivity..."
+          oci iam region list --config-file .oci/config
